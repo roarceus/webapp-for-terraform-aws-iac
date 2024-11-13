@@ -1,0 +1,130 @@
+name: "Web App"
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: "WebApp Tests"
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.DB_NAME }}
+          MYSQL_USER: ${{ secrets.DB_USER }}
+          MYSQL_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=5s
+          --health-timeout=2s
+          --health-retries=5
+          --health-start-period=20s
+
+    steps:
+      # Checkout the repository
+      - name: "Checkout code"
+        uses: actions/checkout@v3
+
+      # Create poth for log file
+      - name: Set up log file
+        run: |
+          sudo touch /var/log/webapp.log
+          sudo chown $USER:$USER /var/log/webapp.log
+          sudo chmod 644 /var/log/webapp.log
+
+      # Set up Node.js
+      - name: "Set up Node.js"
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20.11.0'
+
+      # Install dependencies
+      - name: "Install Dependencies"
+        run: npm install
+
+# Wait for MySQL to be ready
+      - name: Wait for MySQL
+        run: |
+          for i in {1..30}; do
+            if mysqladmin ping -h 127.0.0.1 --silent; then
+              echo "MySQL is up!"
+              break
+            fi
+            echo "Waiting for MySQL..."
+            sleep 2
+          done
+
+      - name: Verify MySQL connection
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mysql-client
+          
+          # Create MySQL config file with credentials
+          cat << EOF > ~/.my.cnf
+          [client]
+          host=127.0.0.1
+          user=root
+          password=root123
+          EOF
+          
+          # Secure the config file
+          chmod 600 ~/.my.cnf
+          
+          # Test connection and show databases
+          echo "Verifying MySQL connection..."
+          mysql --defaults-file=~/.my.cnf -e "SHOW DATABASES;"
+
+      # Create the required tables
+      - name: Create MySQL Tables
+        run: |
+          mysql --defaults-file=~/.my.cnf -e "
+          CREATE DATABASE IF NOT EXISTS \`${{ secrets.DB_NAME }}\`;
+          USE \`${{ secrets.DB_NAME }}\`;
+          CREATE TABLE IF NOT EXISTS users (
+              id CHAR(36) PRIMARY KEY,
+              email VARCHAR(255) NOT NULL UNIQUE,
+              password VARCHAR(255) NOT NULL,
+              first_name VARCHAR(255) NOT NULL,
+              last_name VARCHAR(255) NOT NULL,
+              account_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              account_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+          );"
+  
+      - name: Run tests
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          PORT: ${{ secrets.PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          echo "Running tests with following configuration (excluding sensitive data):"
+          echo "DB_HOST: $DB_HOST"
+          echo "DB_PORT: $DB_PORT"
+          echo "DB_NAME: $DB_NAME"
+          echo "DB_USER: $DB_USER"
+          echo "PORT: $PORT"
+          npm test -- --forceExit
+
+      - name: Cleanup logs
+        if: always()
+        run: |
+          sleep 5
+          killall node || true
+          sudo rm -f /var/log/webapp.log
+
+      # Cleanup step
+      - name: Cleanup MySQL Database
+        if: always() # Ensure this step runs even if previous steps fail
+        run: |
+          mysql --defaults-file=~/.my.cnf -e "
+          DROP DATABASE IF EXISTS \`${{ secrets.DB_NAME }}\`;
+          "
