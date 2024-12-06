@@ -1,7 +1,38 @@
 const request = require('supertest');
 const app = require('../index'); 
 const User = require('../models/userModel');
+const EmailVerification = require('../models/emailVerificationModel');
 const dbHealthService = require('../services/dbHealthService');
+const AWS = require('aws-sdk');
+const sns = require('aws-sdk/clients/sns');
+
+jest.mock('aws-sdk', () => {
+    const mockSNS = {
+        publish: jest.fn().mockReturnValue({
+            promise: jest.fn().mockResolvedValue({}),
+        }),
+    };
+
+    const mockS3 = {
+        upload: jest.fn().mockReturnValue({
+            promise: jest.fn().mockResolvedValue({ Location: 'https://mock-s3-url.com/object-key' }),
+        }),
+        getObject: jest.fn().mockReturnValue({
+            promise: jest.fn().mockResolvedValue({ Body: Buffer.from('mock data') }),
+        }),
+    };
+
+    return {
+        SNS: jest.fn(() => mockSNS),
+        S3: jest.fn(() => mockS3),
+        config: {
+            update: jest.fn(),
+        },
+    };
+});
+
+
+jest.mock('../models/emailVerificationModel');
 
 describe('POST - /v1/user', () => {
     const validUserData = {
@@ -11,6 +42,15 @@ describe('POST - /v1/user', () => {
         last_name: 'Doe',
     };
 
+    beforeEach(() => {
+        sns.prototype.publish = jest.fn().mockReturnValue({
+            promise: jest.fn().mockResolvedValue(),
+        });
+    
+        EmailVerification.create = jest.fn().mockResolvedValue({});
+    });
+    
+
     afterEach(async () => {
         await User.destroy({ where: {} }); // Clear all records in the users table
     });
@@ -18,6 +58,10 @@ describe('POST - /v1/user', () => {
     test('Create user success - 201', async () => {
         const response = await request(app).post('/v1/user').send(validUserData);
         expect(response.status).toBe(201);
+
+        const user = await User.findOne({ where: { email: validUserData.email } });
+        expect(user).not.toBeNull();
+        expect(user.first_name).toBe(validUserData.first_name);
     });
 
     test('User with same email address - 400', async () => {

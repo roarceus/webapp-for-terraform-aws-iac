@@ -44,7 +44,7 @@ source "amazon-ebs" "ubuntu" {
   source_ami      = var.aws_source_ami
   instance_type   = var.instance_type
   ssh_username    = var.ssh_username
-  ami_name        = "${var.ami_name}-${formatdate("YYYY_MM_DD", timestamp())}"
+  ami_name        = "${var.ami_name}-${formatdate("YYYY_MM_DD_HHmmss", timestamp())}"
   ami_description = "AMI for setting up Webapp, and Node.js"
   tags = {
     Name = "CSYE6225-WebApp-Image"

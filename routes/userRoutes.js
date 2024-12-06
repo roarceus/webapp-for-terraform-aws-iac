@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/userController');
-const { authenticateUser } = require('../middlewares/authMiddleware');
+const { authenticateUser, checkEmailVerification } = require('../middlewares/authMiddleware');
 const multer = require('multer');
 const upload = multer();
 
@@ -23,10 +23,10 @@ router.head('/user/self/pic', (req, res) => {
 });
 
 // Get user information (authenticated)
-router.get('/user/self', authenticateUser, userController.getUserInfoController);
+router.get('/user/self', authenticateUser, checkEmailVerification, userController.getUserInfoController);
 
 // Update user information (authenticated)
-router.put('/user/self', authenticateUser, userController.updateUserController);
+router.put('/user/self', authenticateUser, checkEmailVerification, userController.updateUserController);
 
 // Unsupported methods
 router.all('/user/self', (req, res) => {
@@ -34,13 +34,13 @@ router.all('/user/self', (req, res) => {
 });
 
 // Upload profile picture (authenticated)
-router.post('/user/self/pic', authenticateUser, upload.single('profilePic'), userController.addProfilePicController);
+router.post('/user/self/pic', authenticateUser, checkEmailVerification, upload.single('profilePic'), userController.addProfilePicController);
 
 // Get profile picture (authenticated)
-router.get('/user/self/pic', authenticateUser, userController.getProfilePicController);
+router.get('/user/self/pic', authenticateUser, checkEmailVerification, userController.getProfilePicController);
 
 // Delete profile picture (authenticated)
-router.delete('/user/self/pic', authenticateUser, userController.deleteProfilePicController);
+router.delete('/user/self/pic', authenticateUser, checkEmailVerification, userController.deleteProfilePicController);
 
 // Unsupported methods
 router.all('/user/self/pic', (req, res) => {

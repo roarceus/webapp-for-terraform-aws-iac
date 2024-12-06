@@ -1,7 +1,8 @@
 name: Build Packer AMI
 
 on:
-  push:
+  pull_request:
+    types: [closed]
     branches:
       - main
 
@@ -10,8 +11,183 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  # Run WebApp tests
+  test:
+    name: "WebApp Tests"
     runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.DB_NAME }}
+          MYSQL_USER: ${{ secrets.DB_USER }}
+          MYSQL_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=5s
+          --health-timeout=2s
+          --health-retries=5
+          --health-start-period=20s
+
+    steps:
+      # Checkout the repository
+      - name: "Checkout code"
+        uses: actions/checkout@v3
+
+      # Create poth for log file
+      - name: Set up log file
+        run: |
+          sudo touch /var/log/webapp.log
+          sudo chown $USER:$USER /var/log/webapp.log
+          sudo chmod 644 /var/log/webapp.log
+
+      # Set up Node.js
+      - name: "Set up Node.js"
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20.11.0'
+
+      # Install dependencies
+      - name: "Install Dependencies"
+        run: npm install
+
+      # Wait for MySQL to be ready
+      - name: Wait for MySQL
+        run: |
+          for i in {1..30}; do
+            if mysqladmin ping -h 127.0.0.1 --silent; then
+              echo "MySQL is up!"
+              break
+            fi
+            echo "Waiting for MySQL..."
+            sleep 2
+          done
+
+      - name: Verify MySQL connection
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mysql-client
+          
+          # Create MySQL config file with credentials
+          cat << EOF > ~/.my.cnf
+          [client]
+          host=127.0.0.1
+          user=root
+          password=root123
+          EOF
+          
+          # Secure the config file
+          chmod 600 ~/.my.cnf
+          
+          # Test connection and show databases
+          echo "Verifying MySQL connection..."
+          mysql --defaults-file=~/.my.cnf -e "SHOW DATABASES;"
+
+      # Create the required tables
+      - name: Create MySQL Tables
+        run: |
+          mysql --defaults-file=~/.my.cnf -e "
+          CREATE DATABASE IF NOT EXISTS \`${{ secrets.DB_NAME }}\`;
+          USE \`${{ secrets.DB_NAME }}\`;
+          CREATE TABLE IF NOT EXISTS users (
+              id CHAR(36) PRIMARY KEY,
+              email VARCHAR(255) NOT NULL UNIQUE,
+              password VARCHAR(255) NOT NULL,
+              first_name VARCHAR(255) NOT NULL,
+              last_name VARCHAR(255) NOT NULL,
+              account_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              account_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+          );"
+  
+      - name: Run tests
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          PORT: ${{ secrets.PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          echo "Running tests with following configuration (excluding sensitive data):"
+          echo "DB_HOST: $DB_HOST"
+          echo "DB_PORT: $DB_PORT"
+          echo "DB_NAME: $DB_NAME"
+          echo "DB_USER: $DB_USER"
+          echo "PORT: $PORT"
+          npm test -- --forceExit
+
+      - name: Cleanup logs
+        if: always()
+        run: |
+          sleep 5
+          killall node || true
+          sudo rm -f /var/log/webapp.log
+
+      # Cleanup step
+      - name: Cleanup MySQL Database
+        if: always() # Ensure this step runs even if previous steps fail
+        run: |
+          mysql --defaults-file=~/.my.cnf -e "
+          DROP DATABASE IF EXISTS \`${{ secrets.DB_NAME }}\`;
+          "
+
+  # Run Packer check
+  packer_check:
+    name: "Packer Format and Validation Check"
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v2
+
+    - name: Set up Packer
+      uses: hashicorp/setup-packer@v3
+
+    - name: Initialize Packer
+      run: packer init ./packer/aws.pkr.hcl
+
+    - name: Run Packer Fmt
+      run: packer fmt -check -diff ./packer/aws.pkr.hcl
+
+    - name: Run Packer Validate
+      env:
+        AWS_REGION: ${{ secrets.AWS_REGION }}
+        AWS_SOURCE_AMI: ${{ secrets.AWS_SOURCE_AMI }}
+        INSTANCE_TYPE: ${{ secrets.INSTANCE_TYPE }}
+        SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
+        AMI_NAME: ${{ secrets.AMI_NAME }}
+        VOLUME_SIZE: ${{ secrets.VOLUME_SIZE }}
+        VOLUME_TYPE: ${{ secrets.VOLUME_TYPE }}
+        DEMO_ACCOUNT_ID: ${{ secrets.DEMO_ACCOUNT_ID }}
+      run: |
+        run: |
+        # Create a dummy webapp.zip file for validation since webapp.zip doesn't exist until merge
+        touch placeholder.txt
+        zip webapp.zip placeholder.txt
+
+        packer validate \
+          -var "aws_region=${AWS_REGION}" \
+          -var "aws_source_ami=${AWS_SOURCE_AMI}" \
+          -var "instance_type=${INSTANCE_TYPE}" \
+          -var "ssh_username=${SSH_USERNAME}" \
+          -var "ami_name=${AMI_NAME}" \
+          -var "volume_size=${VOLUME_SIZE}" \
+          -var "volume_type=${VOLUME_TYPE}" \
+          -var "demo_account_id=${DEMO_ACCOUNT_ID}" \
+          ./packer/aws.pkr.hcl
+
+  # Create WebApp artifact
+  build_webapp:
+    name: "Build WebApp"
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    needs: 
+      - test
+      - packer_check
 
     steps:
       - name: Checkout code
@@ -30,20 +206,23 @@ jobs:
           name: webapp
           path: webapp.zip
           
+  # Build custom AMI for WebApp
   build_ami:
     name: "Packer Build AMI"
     runs-on: ubuntu-latest
-    needs: build
+    needs: build_webapp
+    outputs:
+      ami_id: ${{ steps.capture_ami.outputs.ami_id }}
     
     steps:
     - name: Checkout Code
       uses: actions/checkout@v2
 
-    - name: "Configure AWS Credentials"
+    - name: "Configure AWS Credentials for Dev"
       uses: aws-actions/configure-aws-credentials@v4.0.2
       with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-access-key-id: ${{ secrets.DEV_AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.DEV_AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ secrets.AWS_REGION }}
 
     - name: Download artifact
@@ -51,8 +230,8 @@ jobs:
       with:
         name: webapp
 
-    - name: Install Packer
-      run: sudo apt-get install -y packer
+    - name: Set up Packer
+      uses: hashicorp/setup-packer@v3
 
     - name: Initialize Packer
       run: packer init ./packer/aws.pkr.hcl
@@ -77,5 +256,104 @@ jobs:
           -var "volume_size=${VOLUME_SIZE}" \
           -var "volume_type=${VOLUME_TYPE}" \
           -var "demo_account_id=${DEMO_ACCOUNT_ID}" \
-          ./packer/aws.pkr.hcl
+          ./packer/aws.pkr.hcl | tee packer_output.txt
+
+        # Extract AMI ID directly here
+        AMI_ID=$(grep -Eo 'ami-[a-z0-9]+' packer_output.txt | tail -n1)
+        echo "AMI_ID=$AMI_ID" >> $GITHUB_ENV
+
+    - name: Capture AMI ID
+      id: capture_ami
+      run: |
+        if [ -z "$AMI_ID" ]; then
+          echo "Failed to extract AMI ID from Packer output."
+          exit 1
+        fi
+        echo "ami_id=$AMI_ID" >> $GITHUB_OUTPUT
+        echo "Captured AMI ID: $AMI_ID"
+
+  # Update Launch Template and Auto Scaling Group with new AMI and start Instance Refresh
+  update_asg:
+    name: "Update ASG with new AMI"
+    runs-on: ubuntu-latest
+    needs: build_ami
+    
+    steps:
+    - name: "Configure AWS Credentials for Demo"
+      uses: aws-actions/configure-aws-credentials@v4.0.2
+      with:
+        aws-access-key-id: ${{ secrets.DEMO_AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.DEMO_AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Get Launch Template ID and create new version
+      run: |
+        # Get Launch Template ID and store it
+        LAUNCH_TEMPLATE_ID=$(aws ec2 describe-launch-templates \
+          --filters "Name=launch-template-name,Values=${{ secrets.LAUNCH_TEMPLATE_NAME }}" \
+          --query "LaunchTemplates[0].LaunchTemplateId" \
+          --output text)
+        
+        echo "LAUNCH_TEMPLATE_ID=${LAUNCH_TEMPLATE_ID}" >> $GITHUB_ENV
+        
+        if [ -z "$LAUNCH_TEMPLATE_ID" ]; then
+          echo "Failed to get Launch Template ID"
+          exit 1
+        fi
+        
+        # Create new version with the new AMI ID
+        NEW_VERSION=$(aws ec2 create-launch-template-version \
+          --launch-template-id ${LAUNCH_TEMPLATE_ID} \
+          --version-description "New version with AMI ${{ needs.build_ami.outputs.ami_id }}" \
+          --source-version '$Latest' \
+          --launch-template-data "{\"ImageId\":\"${{ needs.build_ami.outputs.ami_id }}\"}" \
+          --query "LaunchTemplateVersion.VersionNumber" \
+          --output text)
+        
+        echo "NEW_VERSION=${NEW_VERSION}" >> $GITHUB_ENV
+
+    - name: Update Auto Scaling group
+      run: |
+        aws autoscaling update-auto-scaling-group \
+          --auto-scaling-group-name ${{ secrets.ASG_NAME }} \
+          --launch-template "LaunchTemplateId=${LAUNCH_TEMPLATE_ID},Version=\$Latest"
+
+    - name: Start instance refresh
+      run: |
+        REFRESH_ID=$(aws autoscaling start-instance-refresh \
+          --auto-scaling-group-name ${{ secrets.ASG_NAME }} \
+          --strategy Rolling \
+          --preferences '{"MinHealthyPercentage": 90, "InstanceWarmup": 300}' \
+          --query "InstanceRefreshId" \
+          --output text)
+        
+        if [ -z "$REFRESH_ID" ]; then
+          echo "Failed to start instance refresh"
+          exit 1
+        fi
+        
+        echo "REFRESH_ID=${REFRESH_ID}" >> $GITHUB_ENV
+
+    - name: Wait for instance refresh to complete
+      run: |
+        while true; do
+          STATUS=$(aws autoscaling describe-instance-refreshes \
+            --auto-scaling-group-name ${{ secrets.ASG_NAME }} \
+            --instance-refresh-ids ${{ env.REFRESH_ID }} \
+            --query "InstanceRefreshes[0].Status" \
+            --output text)
+          
+          echo "Current status: $STATUS"
+          
+          if [ "$STATUS" = "Successful" ]; then
+            echo "Instance refresh completed successfully"
+            exit 0
+          elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ]; then
+            echo "Instance refresh $STATUS"
+            exit 1
+          else
+            echo "Instance refresh status: $STATUS. Waiting..."
+            sleep 60
+          fi
+        done
           

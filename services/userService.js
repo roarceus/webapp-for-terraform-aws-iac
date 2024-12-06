@@ -1,7 +1,11 @@
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const User = require('../models/userModel');
 const ProfilePic = require('../models/profilePicModel');
+const EmailVerification = require('../models/emailVerificationModel');
 const AWS = require('aws-sdk');
+AWS.config.update({region: 'us-east-1'});
+const sns = new AWS.SNS();
 const { v4: uuidv4 } = require('uuid');
 const metricsService = require('../services/metricsService');
 const logger = require('../middlewares/loggerMiddleware');
@@ -59,6 +63,34 @@ const createUser = async ({ email, password, first_name, last_name }) => {
 
     metricsService.recordDbQueryTime('createUser', startTime);
     logger.info(`User created: ${newUser.id}`);
+
+    // Generate a verification token
+    const token = crypto.randomBytes(20).toString('hex');
+    const expiresAt = new Date(Date.now() + 2 * 60 * 1000); // Token valid for 2 minutes
+
+    // Create verification record in database
+    await EmailVerification.create({
+        user_id: newUser.id,
+        email: newUser.email,
+        token,
+        expires_at: expiresAt
+    });
+    logger.info(`Verification token created for: ${newUser.id}`);
+
+    // Prepare message payload for SNS
+    const messagePayload = JSON.stringify({
+        userId: newUser.id,
+        email: newUser.email,
+        token,
+        expiresAt: expiresAt.toISOString(),
+    });
+
+    // Publish message to SNS
+    await sns.publish({
+        Message: messagePayload,
+        TopicArn: process.env.SNS_TOPIC_ARN,
+    }).promise();
+    logger.info(`Verification link sent to: ${newUser.email}`);
 
     return newUser;
 };

@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const healthCheckController = require('../controllers/healthCheckController');
+const emailVerificationController = require('../controllers/emailVerificationController');
 
 // GET endpoint
-router.get('/', healthCheckController.healthCheck);
+router.get('/', emailVerificationController.verifyEmailController);
 
 // All other endpoints
 router.all('/', (req, res) => {

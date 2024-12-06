@@ -49,7 +49,7 @@ jobs:
       - name: "Install Dependencies"
         run: npm install
 
-# Wait for MySQL to be ready
+      # Wait for MySQL to be ready
       - name: Wait for MySQL
         run: |
           for i in {1..30}; do
